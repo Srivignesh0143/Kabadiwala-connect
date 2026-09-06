@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import api from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 
 const initialForm = {
   materialType: 'PCB',
@@ -13,6 +14,7 @@ const initialForm = {
 
 export default function LotFormPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [form, setForm] = useState(initialForm);
   const [submitting, setSubmitting] = useState(false);
 
@@ -20,8 +22,28 @@ export default function LotFormPage() {
     setForm((prev) => ({ ...prev, [event.target.name]: event.target.value }));
   };
 
+  const handleImageChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select an image file');
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => setForm((prev) => ({ ...prev, image: reader.result }));
+    reader.onerror = () => toast.error('Unable to read the selected image');
+    reader.readAsDataURL(file);
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (!form.image) {
+      toast.error('Please upload a material image');
+      return;
+    }
     setSubmitting(true);
 
     try {
@@ -38,7 +60,7 @@ export default function LotFormPage() {
   return (
     <div className="max-w-3xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
       <div className="mb-6">
-        <p className="text-xs uppercase tracking-[0.35em] text-emerald-600">Collector workflow</p>
+        <p className="text-xs uppercase tracking-[0.35em] text-emerald-600">{user?.role === 'AGGREGATOR' ? 'Aggregator workflow' : 'Collector workflow'}</p>
         <h1 className="mt-2 text-3xl font-bold text-slate-900">Create e-waste lot</h1>
       </div>
 
@@ -66,9 +88,10 @@ export default function LotFormPage() {
           <input name="location" value={form.location} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-slate-900" required />
         </div>
 
-        <div className="md:col-span-2">
-          <label className="mb-1 block text-sm text-slate-700">Material image URL</label>
-          <input name="image" value={form.image} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-slate-900" placeholder="https://..." />
+        <div>
+        <label className="mb-1 block text-sm text-slate-700">Material image</label>
+        <input name="image" type="file" accept="image/*" onChange={handleImageChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-slate-900 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-50 file:px-3 file:py-2 file:text-emerald-700" required />
+        {form.image ? <img src={form.image} alt="Selected material preview" className="mt-3 h-24 w-24 rounded-xl object-cover" /> : null}
         </div>
 
         <div className="md:col-span-2">

@@ -12,10 +12,16 @@ export default function BuyerPage() {
     async function fetchData() {
       try {
         const [entitiesResponse, lotsResponse] = await Promise.all([api.get('/entities'), api.get('/lots')]);
-        setEntities(entitiesResponse.data.entities || []);
+        const availableEntities = (entitiesResponse.data.entities || [])
+              .filter(
+                    (entity) =>
+                    entity.verificationStatus === 'VERIFIED' &&
+                    (entity.type === 'RECYCLER' || entity.type === 'AGGREGATOR')
+                 );
+        setEntities(availableEntities);
         setLots(lotsResponse.data.lots || []);
         setSelectedLotId(lotsResponse.data.lots?.[0]?._id || '');
-        setSelectedBuyerId(entitiesResponse.data.entities?.[0]?._id || '');
+        setSelectedBuyerId(availableEntities[0]?._id || '');
       } catch {
         toast.error('Unable to load buyer network');
       }
@@ -27,26 +33,26 @@ export default function BuyerPage() {
   const handleMatch = async () => {
     const buyer = entities.find((item) => item._id === selectedBuyerId);
     if (!selectedLotId || !buyer) {
-      toast.error('Please select a lot and a verified buyer');
+      toast.error('Please select a lot and a verified recycler');
       return;
     }
 
     try {
       await api.post(`/lots/${selectedLotId}/match`, {
-        buyerId: buyer.user,
+        buyerId: buyer._id,
         buyerType: buyer.type,
       });
       toast.success(`Lot matched with ${buyer.name}`);
     } catch (error) {
-      toast.error(error.response?.data?.message || 'Unable to match buyer');
+      toast.error(error.response?.data?.message || 'Unable to match recycler');
     }
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <p className="text-xs uppercase tracking-[0.35em] text-emerald-600">Buyer matching</p>
-        <h1 className="mt-2 text-3xl font-bold text-slate-900">Recommend suitable buyers</h1>
+        <p className="text-xs uppercase tracking-[0.35em] text-emerald-600">Recycler matching</p>
+        <h1 className="mt-2 text-3xl font-bold text-slate-900">Select a recycler for your lot</h1>
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -61,7 +67,7 @@ export default function BuyerPage() {
           </div>
 
           <div>
-            <label className="mb-2 block text-sm text-slate-700">Select buyer</label>
+            <label className="mb-2 block text-sm text-slate-700">Select recycler</label>
             <select value={selectedBuyerId} onChange={(e) => setSelectedBuyerId(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-slate-900">
               {entities.map((entity) => (
                 <option key={entity._id} value={entity._id}>{entity.name} • {entity.type}</option>
@@ -71,7 +77,7 @@ export default function BuyerPage() {
         </div>
 
         <button onClick={handleMatch} className="mt-5 rounded-xl bg-emerald-600 px-4 py-3 font-semibold text-white transition hover:bg-emerald-500">
-          Match lot to buyer
+          Match lot to recycler
         </button>
       </div>
 
