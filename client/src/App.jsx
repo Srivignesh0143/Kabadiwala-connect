@@ -14,6 +14,7 @@ import LotsPage from './pages/LotsPage';
 import RegisterPage from './pages/RegisterPage';
 import TraceabilityPage from './pages/TraceabilityPage';
 import UsersPage from './pages/UsersPage';
+import LandingPage from './pages/LandingPage';
 
 function ProtectedRoute({ allowedRoles }) {
   const { user, loading } = useAuth();
@@ -35,6 +36,7 @@ function ProtectedRoute({ allowedRoles }) {
 
 function AppShell() {
   const { user, logout } = useAuth();
+  const isLandingPage = window.location.pathname === '/';
 
   const breadcrumbMap = {
     '/dashboard': 'DASHBOARD',
@@ -50,7 +52,7 @@ function AppShell() {
   const currentPath = window.location.pathname;
   const breadcrumb = user ? `${user.role} / ${breadcrumbMap[currentPath] || 'DASHBOARD'}` : 'DASHBOARD';
 
-  if (!user) {
+  if (!user || isLandingPage) {
     return <Outlet />;
   }
 
@@ -73,7 +75,7 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="/" element={<Navigate to="/login" replace />} />
+            <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
 
