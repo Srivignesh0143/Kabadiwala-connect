@@ -1,165 +1,208 @@
 const express = require('express');
+
 const Lot = require('../models/Lot');
 const Entity = require('../models/Entity');
-const Transaction = require('../models/Transaction');
-const TraceabilityEvent = require('../models/TraceabilityEvent');
+const Traceability = require('../models/TraceabilityEvent');
+
 const { protect } = require('../middleware/auth');
 
 const router = express.Router();
 
-function generateLotId() {
-  const year = new Date().getFullYear();
-  return `EW-${year}-${String(Date.now()).slice(-6)}`;
-}
+/*
+=================================================
+HELPER: GET USER ID
+=================================================
+*/
 
-function toObjectId(value) {
-  return value && value.toString ? value.toString() : value;
-}
+function getId(value) {
+  if (!value) return null;
 
-function buildAccessFilter(user) {
-  const userId = toObjectId(user._id);
-
-  if (user.role === 'COLLECTOR') {
-    return { collector: userId };
+  if (typeof value === 'object') {
+    return String(value._id || value.id);
   }
 
-  if (user.role === 'AGGREGATOR') {
-    return {
-      $or: [
-        { createdBy: userId },
-        { buyer: userId },
-      ],
-    };
-  }
-
-  if (user.role === 'RECYCLER') {
-    return { buyer: userId };
-  }
-
-  return {};
+  return String(value);
 }
-
-function sanitizeLot(lot) {
-  if (!lot) return lot;
-
-  const normalized = lot.toObject ? lot.toObject() : lot;
-
-  normalized.collector = toObjectId(normalized.collector);
-  normalized.createdBy = toObjectId(normalized.createdBy);
-
-  normalized.buyer = normalized.buyer
-    ? toObjectId(normalized.buyer)
-    : null;
-
-  normalized.sourceLots = (normalized.sourceLots || []).map(
-    (sourceLot) => toObjectId(sourceLot)
-  );
-
-  return normalized;
-}
-
 
 /*
-=========================================
-GET ALL ACCESSIBLE LOTS
-=========================================
+=================================================
+HELPER: CREATE TRACEABILITY EVENT
+=================================================
+*/
+
+async function createTraceabilityEvent({
+  lot,
+  eventType,
+  user,
+  location,
+  remarks,
+}) {
+  try {
+    await Traceability.create({
+      lot: lot._id,
+      lotId: lot.lotId,
+      eventType,
+      timestamp: new Date(),
+      user: user?._id || user,
+      location: location || lot.location,
+      remarks: remarks || '',
+    });
+  } catch (error) {
+    console.error(
+      'Unable to create traceability event:',
+      error.message
+    );
+  }
+}
+
+/*
+=================================================
+GET LOTS
+=================================================
 */
 
 router.get('/', protect(), async (req, res) => {
   try {
-    const lots = await Lot.find(
-      buildAccessFilter(req.user)
-    )
-      .sort({ updatedAt: -1 })
-      .lean();
+    const user = req.user;
+
+    let query = {};
+
+    if (user.role === 'ADMIN') {
+      query = {};
+    } else if (user.role === 'COLLECTOR') {
+      query = {
+        collector: user._id,
+      };
+    } else if (user.role === 'AGGREGATOR') {
+      query = {
+        aggregator: user._id,
+      };
+    } else if (user.role === 'RECYCLER') {
+      query = {
+        buyer: user._id,
+        buyerType: 'RECYCLER',
+      };
+    }
+
+    const lots = await Lot.find(query)
+      .populate('collector', 'name email phone role')
+      .populate('createdBy', 'name email role')
+      .populate('buyer', 'name email phone role')
+      .populate('aggregator', 'name email phone role')
+      .sort({ updatedAt: -1 });
 
     return res.status(200).json({
-      lots: lots.map(sanitizeLot),
+      lots,
     });
-
   } catch (error) {
+    console.error('Unable to load lots:', error);
 
     return res.status(500).json({
       message: 'Unable to load lots',
       error: error.message,
     });
-
   }
 });
 
-
 /*
-=========================================
-GET LOT TRACEABILITY
-=========================================
+=================================================
+GET TRACEABILITY FOR ONE LOT
+=================================================
 */
 
-router.get('/:id/traceability', protect(), async (req, res) => {
-  try {
+router.get(
+  '/:id/traceability',
+  protect(),
 
-    const lot = await Lot.findOne({
-      $or: [
-        { _id: req.params.id },
-        { lotId: req.params.id },
-      ],
-    }).lean();
+  async (req, res) => {
+    try {
+      const lot = await Lot.findById(req.params.id);
 
-    if (!lot) {
-      return res.status(404).json({
-        message: 'Lot not found.',
-      });
-    }
-
-    if (req.user.role !== 'ADMIN') {
-
-      const accessibleLot = await Lot.exists({
-        _id: lot._id,
-        ...buildAccessFilter(req.user),
-      });
-
-      if (!accessibleLot) {
-        return res.status(403).json({
-          message: 'You do not have access to this lot.',
+      if (!lot) {
+        return res.status(404).json({
+          message: 'Lot not found.',
         });
       }
+
+      const userId = String(req.user._id);
+
+      let hasAccess = false;
+
+      if (req.user.role === 'ADMIN') {
+        hasAccess = true;
+      }
+
+      if (
+        req.user.role === 'COLLECTOR' &&
+        getId(lot.collector) === userId
+      ) {
+        hasAccess = true;
+      }
+
+      if (
+        req.user.role === 'AGGREGATOR' &&
+        getId(lot.aggregator) === userId
+      ) {
+        hasAccess = true;
+      }
+
+      if (
+        req.user.role === 'RECYCLER' &&
+        getId(lot.buyer) === userId &&
+        lot.buyerType === 'RECYCLER'
+      ) {
+        hasAccess = true;
+      }
+
+      if (!hasAccess) {
+        return res.status(403).json({
+          message:
+            'You do not have permission to view this lot traceability.',
+        });
+      }
+
+      const traceability = await Traceability.find({
+        lot: lot._id,
+      })
+        .populate(
+          'user',
+          'name email role'
+        )
+        .sort({
+          timestamp: 1,
+        });
+
+      return res.status(200).json({
+        lot,
+        traceability,
+      });
+    } catch (error) {
+      console.error(
+        'Unable to load traceability:',
+        error
+      );
+
+      return res.status(500).json({
+        message: 'Unable to load traceability',
+        error: error.message,
+      });
     }
-
-    const events = await TraceabilityEvent.find({
-      lot: lot._id,
-    })
-      .sort({ timestamp: 1 })
-      .lean();
-
-    return res.status(200).json({
-      traceability: events,
-    });
-
-  } catch (error) {
-
-    return res.status(500).json({
-      message: 'Unable to load traceability',
-      error: error.message,
-    });
-
   }
-});
-
+);
 
 /*
-=========================================
-AI / SMART RECOMMENDATIONS
-=========================================
+=================================================
+GET SINGLE LOT
+=================================================
 */
 
-router.get('/:id/recommendations', protect(), async (req, res) => {
+router.get('/:id', protect(), async (req, res) => {
   try {
-
-    const lot = await Lot.findOne({
-      $or: [
-        { _id: req.params.id },
-        { lotId: req.params.id },
-      ],
-    });
+    const lot = await Lot.findById(req.params.id)
+      .populate('collector', 'name email phone role')
+      .populate('createdBy', 'name email role')
+      .populate('buyer', 'name email phone role')
+      .populate('aggregator', 'name email phone role');
 
     if (!lot) {
       return res.status(404).json({
@@ -167,226 +210,174 @@ router.get('/:id/recommendations', protect(), async (req, res) => {
       });
     }
 
-    let allowedTypes = [];
-
-    // Collector can select Aggregator OR Recycler
-    if (req.user.role === 'COLLECTOR') {
-      allowedTypes = ['AGGREGATOR', 'RECYCLER'];
-    }
-
-    // Aggregator can select only Recycler
-    if (req.user.role === 'AGGREGATOR') {
-      allowedTypes = ['RECYCLER'];
-    }
-
-    const verifiedEntities = await Entity.find({
-      verificationStatus: 'VERIFIED',
-      type: { $in: allowedTypes },
-    }).lean();
-
-    const recommended = verifiedEntities
-      .filter((entity) =>
-        entity.materialsAccepted?.includes(lot.materialType)
-      )
-      .map((entity) => ({
-        _id: entity._id,
-        name: entity.name,
-        type: entity.type,
-        verificationStatus: entity.verificationStatus,
-        location: entity.location,
-        materialAccepted: lot.materialType,
-        reason:
-          entity.type === 'RECYCLER'
-            ? 'Verified recycler compatible with this material.'
-            : 'Verified nearby aggregator compatible with this material.',
-      }));
-
     return res.status(200).json({
-      recommendations: recommended,
+      lot,
     });
-
   } catch (error) {
-
     return res.status(500).json({
-      message: 'Unable to load recommendations',
+      message: 'Unable to load lot',
       error: error.message,
     });
-
   }
 });
 
-
 /*
-=========================================
+=================================================
 CREATE LOT
-=========================================
+
+ONLY COLLECTOR
+=================================================
 */
 
 router.post(
   '/',
-  protect(['COLLECTOR', 'AGGREGATOR']),
+  protect('COLLECTOR'),
+
   async (req, res) => {
-
     try {
-
       const {
+        lotId,
         materialType,
+        image,
         estimatedWeight,
         location,
-        image,
         description,
-        sourceLots = [],
+        aiPrediction,
       } = req.body;
 
       if (
+        !lotId ||
         !materialType ||
         !estimatedWeight ||
-        !location ||
-        !image
+        !location
       ) {
         return res.status(400).json({
           message:
-            'Material type, estimated weight, location, and image are required.',
+            'Lot ID, material type, estimated weight and location are required.',
         });
       }
 
-      if (
-        typeof image !== 'string' ||
-        !image.startsWith('data:image/')
-      ) {
-        return res.status(400).json({
-          message: 'Please upload an image file.',
+      const existingLot = await Lot.findOne({
+        lotId,
+      });
+
+      if (existingLot) {
+        return res.status(409).json({
+          message:
+            'A lot with this Lot ID already exists.',
         });
       }
-
-      const lotType =
-        req.user.role === 'COLLECTOR'
-          ? 'COLLECTION'
-          : 'CONSOLIDATED';
 
       const lot = await Lot.create({
+        lotId,
 
-        lotId: generateLotId(),
-
-        collector:
-          req.user.role === 'COLLECTOR'
-            ? req.user._id
-            : sourceLots[0]
-              ? await Lot.findById(sourceLots[0]).then(
-                  (source) =>
-                    source
-                      ? source.collector
-                      : req.user._id
-                )
-              : req.user._id,
+        collector: req.user._id,
 
         createdBy: req.user._id,
 
-        lotType,
-
-        sourceLots:
-          lotType === 'CONSOLIDATED'
-            ? sourceLots
-            : [],
+        lotType: 'COLLECTION',
 
         materialType,
 
         image,
 
-        estimatedWeight: Number(estimatedWeight),
-
-        actualWeight: null,
+        estimatedWeight,
 
         location,
 
-        buyer: null,
+        description,
 
-        buyerType: null,
+        aiPrediction,
 
         status: 'LOT_CREATED',
 
         paymentStatus: 'PENDING',
 
-        description: description || '',
+        buyer: null,
 
-        aiPrediction:
-          `Likely ${materialType} material for e-waste recovery`,
+        buyerType: null,
 
-        syncStatus: 'PENDING',
-
+        aggregator: null,
       });
 
-
-      await TraceabilityEvent.create({
-
-        lot: lot._id,
-
-        lotId: lot.lotId,
+      await createTraceabilityEvent({
+        lot,
 
         eventType: 'LOT_CREATED',
 
-        user: req.user._id,
+        user: req.user,
 
-        location,
+        location: lot.location,
 
-        remarks:
-          `${req.user.role} created a new ${lotType.toLowerCase()} lot.`,
-
+        remarks: 'Lot created by Collector',
       });
-
 
       return res.status(201).json({
-        lot: sanitizeLot(lot),
+        message: 'Lot created successfully',
+        lot,
       });
-
     } catch (error) {
+      console.error('Unable to create lot:', error);
 
       return res.status(500).json({
         message: 'Unable to create lot',
         error: error.message,
       });
-
     }
-
   }
 );
 
-
 /*
-=========================================
+=================================================
 MATCH LOT
-=========================================
 
-COLLECTOR:
-→ AGGREGATOR
-→ RECYCLER
+COLLECTOR CAN SELECT:
 
-AGGREGATOR:
-→ RECYCLER ONLY
+1. AGGREGATOR
+2. RECYCLER
+
+IMPORTANT:
+
+AGGREGATOR → NO MATERIAL RESTRICTION
+RECYCLER → MUST ACCEPT THE LOT MATERIAL
+=================================================
 */
 
 router.post(
   '/:id/match',
-  protect(['COLLECTOR', 'AGGREGATOR', 'ADMIN']),
+  protect('COLLECTOR'),
+
   async (req, res) => {
-
     try {
+      const {
+        buyerId,
+        buyerType,
+      } = req.body;
 
-      const { buyerId } = req.body;
-
-      if (!buyerId) {
+      if (!buyerId || !buyerType) {
         return res.status(400).json({
-          message: 'Please select an Aggregator or Recycler.',
+          message:
+            'Buyer ID and buyer type are required.',
         });
       }
 
+      const normalizedBuyerType =
+        String(buyerType).toUpperCase();
 
-      const lot = await Lot.findOne({
-        $or: [
-          { _id: req.params.id },
-          { lotId: req.params.id },
-        ],
-      });
+      if (
+        !['AGGREGATOR', 'RECYCLER'].includes(
+          normalizedBuyerType
+        )
+      ) {
+        return res.status(400).json({
+          message:
+            'Buyer must be an Aggregator or Recycler.',
+        });
+      }
+
+      const lot = await Lot.findById(
+        req.params.id
+      );
 
       if (!lot) {
         return res.status(404).json({
@@ -394,188 +385,373 @@ router.post(
         });
       }
 
-
-      const buyerEntity = await Entity.findById(buyerId);
-
-      if (!buyerEntity) {
-        return res.status(404).json({
-          message: 'Selected entity not found.',
+      if (
+        String(lot.collector) !==
+        String(req.user._id)
+      ) {
+        return res.status(403).json({
+          message:
+            'You can only match your own lots.',
         });
       }
 
-
-      /*
-      -----------------------------------------
-      VERIFY ENTITY
-      -----------------------------------------
-      */
-
-      if (buyerEntity.verificationStatus !== 'VERIFIED') {
-
+      if (lot.status !== 'LOT_CREATED') {
         return res.status(400).json({
           message:
-            'Only verified Aggregators or Recyclers can be selected.',
+            `This lot is already in ${lot.status} status and cannot be matched again.`,
         });
-
       }
 
+      const entity = await Entity.findById(
+        buyerId
+      );
+
+      if (!entity) {
+        return res.status(404).json({
+          message:
+            'Selected entity not found.',
+        });
+      }
+
+      if (
+        entity.type !== normalizedBuyerType
+      ) {
+        return res.status(400).json({
+          message:
+            `Selected entity is not a ${normalizedBuyerType}.`,
+        });
+      }
+
+      if (
+        entity.verificationStatus !==
+        'VERIFIED'
+      ) {
+        return res.status(400).json({
+          message:
+            `${entity.name} is not verified yet.`,
+        });
+      }
 
       /*
-      -----------------------------------------
-      ROLE BASED MATCHING RULES
-      -----------------------------------------
-      */
+      =============================================
+      RECYCLER MATERIAL VALIDATION ONLY
 
-      // Collector → Aggregator OR Recycler
-      if (req.user.role === 'COLLECTOR') {
-
-        if (
-          !['AGGREGATOR', 'RECYCLER'].includes(
-            buyerEntity.type
-          )
-        ) {
-
-          return res.status(400).json({
-            message:
-              'Collector can select only an Aggregator or Recycler.',
-          });
-
-        }
-
-      }
-
-
-      // Aggregator → Recycler ONLY
-      if (req.user.role === 'AGGREGATOR') {
-
-        if (buyerEntity.type !== 'RECYCLER') {
-
-          return res.status(400).json({
-            message:
-              'Aggregator can select only a Recycler.',
-          });
-
-        }
-
-      }
-
-
-      /*
-      -----------------------------------------
-      MATERIAL COMPATIBILITY
-      -----------------------------------------
+      Aggregators can receive any material.
+      =============================================
       */
 
       if (
-        !buyerEntity.materialsAccepted ||
-        !buyerEntity.materialsAccepted.includes(
-          lot.materialType
+        normalizedBuyerType === 'RECYCLER' &&
+        (
+          !Array.isArray(entity.materialsAccepted) ||
+          !entity.materialsAccepted.includes(
+            lot.materialType
+          )
         )
       ) {
-
         return res.status(400).json({
           message:
-            `${buyerEntity.name} cannot accept ${lot.materialType}.`,
+            `${entity.name} cannot accept ${lot.materialType}.`,
         });
-
       }
 
+      lot.buyer = entity.user;
 
-      /*
-      -----------------------------------------
-      MATCH LOT
-      -----------------------------------------
-      */
+      lot.buyerType = normalizedBuyerType;
 
-      lot.buyer = buyerEntity.user;
-
-      lot.buyerType = buyerEntity.type;
+      if (
+        normalizedBuyerType === 'AGGREGATOR'
+      ) {
+        lot.aggregator = entity.user;
+      }
 
       lot.status = 'MATCHED';
 
-      lot.paymentStatus = 'PENDING';
-
       lot.updatedAt = new Date();
-
 
       await lot.save();
 
+      await createTraceabilityEvent({
+        lot,
+
+        eventType: 'LOT_MATCHED',
+
+        user: req.user,
+
+        location: lot.location,
+
+        remarks:
+          `Lot matched with ${entity.name} (${normalizedBuyerType})`,
+      });
+
+      return res.status(200).json({
+        message:
+          `Lot successfully matched with ${entity.name}.`,
+        lot,
+      });
+    } catch (error) {
+      console.error(
+        'Unable to match lot:',
+        error
+      );
+
+      return res.status(500).json({
+        message: 'Unable to match lot',
+        error: error.message,
+      });
+    }
+  }
+);
+
+/*
+=================================================
+AGGREGATOR ACCEPTS LOT
+
+MATCHED
+↓
+IN_INVENTORY
+=================================================
+*/
+
+router.post(
+  '/:id/accept',
+  protect('AGGREGATOR'),
+
+  async (req, res) => {
+    try {
+      const lot = await Lot.findById(
+        req.params.id
+      );
+
+      if (!lot) {
+        return res.status(404).json({
+          message: 'Lot not found.',
+        });
+      }
+
+      if (
+        getId(lot.aggregator) !==
+        String(req.user._id)
+      ) {
+        return res.status(403).json({
+          message:
+            'This lot is not assigned to you.',
+        });
+      }
+
+      if (lot.status !== 'MATCHED') {
+        return res.status(400).json({
+          message:
+            `This lot cannot be accepted in ${lot.status} status.`,
+        });
+      }
+
+      if (
+        lot.buyerType !== 'AGGREGATOR'
+      ) {
+        return res.status(400).json({
+          message:
+            'This lot was not matched to an Aggregator.',
+        });
+      }
+
+      lot.status = 'IN_INVENTORY';
+
+      lot.updatedAt = new Date();
+
+      await lot.save();
+
+      await createTraceabilityEvent({
+        lot,
+
+        eventType:
+          'RECEIVED_BY_AGGREGATOR',
+
+        user: req.user,
+
+        location: lot.location,
+
+        remarks:
+          'Aggregator received the lot into inventory.',
+      });
+
+      return res.status(200).json({
+        message:
+          'Lot accepted and added to inventory.',
+        lot,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        message: 'Unable to accept lot',
+        error: error.message,
+      });
+    }
+  }
+);
+
+/*
+=================================================
+AGGREGATOR TRANSFERS LOT TO RECYCLER
+
+IN_INVENTORY
+↓
+TRANSFERRED_TO_RECYCLER
+
+IMPORTANT:
+Recycler must accept the material.
+=================================================
+*/
+
+router.post(
+  '/:id/transfer-to-recycler',
+  protect('AGGREGATOR'),
+
+  async (req, res) => {
+    try {
+      const {
+        recyclerId,
+      } = req.body;
+
+      if (!recyclerId) {
+        return res.status(400).json({
+          message:
+            'Recycler ID is required.',
+        });
+      }
+
+      const lot = await Lot.findById(
+        req.params.id
+      );
+
+      if (!lot) {
+        return res.status(404).json({
+          message: 'Lot not found.',
+        });
+      }
+
+      if (
+        getId(lot.aggregator) !==
+        String(req.user._id)
+      ) {
+        return res.status(403).json({
+          message:
+            'You can only transfer your own inventory lots.',
+        });
+      }
+
+      if (lot.status !== 'IN_INVENTORY') {
+        return res.status(400).json({
+          message:
+            `This lot is in ${lot.status} status and cannot be transferred.`,
+        });
+      }
+
+      const recycler =
+        await Entity.findById(recyclerId);
+
+      if (!recycler) {
+        return res.status(404).json({
+          message: 'Recycler not found.',
+        });
+      }
+
+      if (recycler.type !== 'RECYCLER') {
+        return res.status(400).json({
+          message:
+            'Selected entity is not a Recycler.',
+        });
+      }
+
+      if (
+        recycler.verificationStatus !==
+        'VERIFIED'
+      ) {
+        return res.status(400).json({
+          message:
+            `${recycler.name} is not verified.`,
+        });
+      }
 
       /*
-      -----------------------------------------
-      TRACEABILITY
-      -----------------------------------------
+      =============================================
+      RECYCLER MATERIAL VALIDATION
+      =============================================
       */
 
-      await TraceabilityEvent.create({
+      if (
+        !Array.isArray(
+          recycler.materialsAccepted
+        ) ||
+        !recycler.materialsAccepted.includes(
+          lot.materialType
+        )
+      ) {
+        return res.status(400).json({
+          message:
+            `${recycler.name} cannot accept ${lot.materialType}.`,
+        });
+      }
 
-        lot: lot._id,
+      lot.buyer = recycler.user;
 
-        lotId: lot.lotId,
+      lot.buyerType = 'RECYCLER';
 
-        eventType: 'MATCHED',
+      lot.status =
+        'TRANSFERRED_TO_RECYCLER';
 
-        user: req.user._id,
+      lot.updatedAt = new Date();
+
+      await lot.save();
+
+      await createTraceabilityEvent({
+        lot,
+
+        eventType:
+          'TRANSFERRED_TO_RECYCLER',
+
+        user: req.user,
 
         location: lot.location,
 
         remarks:
-          `Matched with verified ${buyerEntity.type.toLowerCase()} ${buyerEntity.name}.`,
-
+          `Aggregator transferred the lot to Recycler: ${recycler.name}`,
       });
 
-
       return res.status(200).json({
-
         message:
-          `Lot successfully matched with ${buyerEntity.name}.`,
-
-        lot: sanitizeLot(lot),
-
+          `Lot transferred to ${recycler.name}.`,
+        lot,
       });
-
-
     } catch (error) {
+      console.error(
+        'Unable to transfer lot:',
+        error
+      );
 
       return res.status(500).json({
-
-        message: 'Unable to match buyer',
-
+        message:
+          'Unable to transfer lot to Recycler',
         error: error.message,
-
       });
-
     }
-
   }
 );
 
-
 /*
-=========================================
-HANDOVER LOT
-=========================================
+=================================================
+RECYCLER STARTS PROCESSING
+=================================================
 */
 
 router.post(
-  '/:id/handover',
-  protect(['COLLECTOR', 'AGGREGATOR', 'RECYCLER']),
+  '/:id/start-processing',
+  protect('RECYCLER'),
+
   async (req, res) => {
-
     try {
-
-      const {
-        actualWeight,
-        handoverLocation,
-        remarks,
-      } = req.body;
-
-      const lot = await Lot.findOne({
-        $or: [
-          { _id: req.params.id },
-          { lotId: req.params.id },
-        ],
-      });
+      const lot = await Lot.findById(
+        req.params.id
+      );
 
       if (!lot) {
         return res.status(404).json({
@@ -583,243 +759,290 @@ router.post(
         });
       }
 
+      if (
+        getId(lot.buyer) !==
+        String(req.user._id)
+      ) {
+        return res.status(403).json({
+          message:
+            'This lot is not assigned to you.',
+        });
+      }
 
-      lot.actualWeight =
-        actualWeight || lot.estimatedWeight;
+      if (
+        lot.buyerType !== 'RECYCLER'
+      ) {
+        return res.status(400).json({
+          message:
+            'This lot is not assigned to a Recycler.',
+        });
+      }
 
-      lot.location =
-        handoverLocation || lot.location;
+      const allowedStatuses = [
+        'MATCHED',
+        'TRANSFERRED_TO_RECYCLER',
+      ];
 
-      lot.status = 'HANDED_OVER';
+      if (
+        !allowedStatuses.includes(
+          lot.status
+        )
+      ) {
+        return res.status(400).json({
+          message:
+            `Cannot start processing from ${lot.status}.`,
+        });
+      }
+
+      lot.status = 'PROCESSING';
 
       lot.updatedAt = new Date();
 
       await lot.save();
 
+      await createTraceabilityEvent({
+        lot,
 
-      await TraceabilityEvent.create({
+        eventType:
+          'PROCESSING_STARTED',
 
-        lot: lot._id,
-
-        lotId: lot.lotId,
-
-        eventType: 'HANDED_OVER',
-
-        user: req.user._id,
+        user: req.user,
 
         location: lot.location,
 
         remarks:
-          remarks || 'Lot handed over successfully.',
-
+          'Recycler started processing the material.',
       });
-
 
       return res.status(200).json({
-        lot: sanitizeLot(lot),
+        message:
+          'Recycling process started.',
+        lot,
       });
-
-
     } catch (error) {
-
       return res.status(500).json({
-        message: 'Unable to record handover',
+        message:
+          'Unable to start processing',
         error: error.message,
       });
-
     }
-
   }
 );
 
-
 /*
-=========================================
-RECORD PAYMENT
-=========================================
+=================================================
+MARK LOT AS RECYCLED
+=================================================
 */
 
 router.post(
-  '/:id/payment',
-  protect(['COLLECTOR', 'AGGREGATOR', 'RECYCLER']),
+  '/:id/recycle',
+  protect('RECYCLER'),
+
   async (req, res) => {
-
     try {
-
-      const {
-        amount,
-        paymentMethod = 'UPI',
-        reference,
-      } = req.body;
-
-
-      const lot = await Lot.findOne({
-        $or: [
-          { _id: req.params.id },
-          { lotId: req.params.id },
-        ],
-      });
-
+      const lot = await Lot.findById(
+        req.params.id
+      );
 
       if (!lot) {
-
         return res.status(404).json({
           message: 'Lot not found.',
         });
-
       }
 
+      if (
+        getId(lot.buyer) !==
+        String(req.user._id)
+      ) {
+        return res.status(403).json({
+          message:
+            'This lot is not assigned to you.',
+        });
+      }
 
-      const transaction = await Transaction.create({
+      if (
+        lot.buyerType !== 'RECYCLER'
+      ) {
+        return res.status(400).json({
+          message:
+            'This lot is not assigned to a Recycler.',
+        });
+      }
 
-        transactionId:
-          `TX-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`,
+      if (
+        lot.status !== 'PROCESSING'
+      ) {
+        return res.status(400).json({
+          message:
+            `Lot cannot be recycled from ${lot.status}.`,
+        });
+      }
 
-        lot: lot._id,
-
-        seller: lot.collector,
-
-        buyer: lot.buyer || req.user._id,
-
-        amount: Number(amount) || 0,
-
-        paymentMethod,
-
-        paymentStatus: 'PAID',
-
-        reference:
-          reference || `REF-${Date.now()}`,
-
-      });
-
-
-      lot.paymentStatus = 'PAID';
+      lot.status = 'RECYCLED';
 
       lot.updatedAt = new Date();
 
       await lot.save();
 
+      await createTraceabilityEvent({
+        lot,
 
-      await TraceabilityEvent.create({
+        eventType: 'RECYCLED',
 
-        lot: lot._id,
-
-        lotId: lot.lotId,
-
-        eventType: 'PAYMENT_RECORDED',
-
-        user: req.user._id,
+        user: req.user,
 
         location: lot.location,
 
         remarks:
-          `Payment recorded for ${amount || 0} via ${paymentMethod}.`,
-
+          'Material recycling completed.',
       });
-
 
       return res.status(200).json({
-
-        lot: sanitizeLot(lot),
-
-        transaction,
-
+        message:
+          'Lot successfully marked as recycled.',
+        lot,
       });
-
-
     } catch (error) {
-
       return res.status(500).json({
-
-        message: 'Unable to record payment',
-
+        message: 'Unable to recycle lot',
         error: error.message,
-
       });
-
     }
-
   }
 );
 
-
 /*
-=========================================
-UPDATE LOT STATUS
-=========================================
+=================================================
+UPDATE PAYMENT STATUS
+=================================================
 */
 
 router.patch(
-  '/:id/status',
-  protect(['AGGREGATOR', 'RECYCLER', 'ADMIN']),
+  '/:id/payment',
+  protect(),
+
   async (req, res) => {
-
     try {
+      const {
+        paymentStatus,
+      } = req.body;
 
-      const { status } = req.body;
+      if (
+        !['PENDING', 'PAID'].includes(
+          paymentStatus
+        )
+      ) {
+        return res.status(400).json({
+          message:
+            'Payment status must be PENDING or PAID.',
+        });
+      }
 
-
-      const lot = await Lot.findOne({
-        $or: [
-          { _id: req.params.id },
-          { lotId: req.params.id },
-        ],
-      });
-
+      const lot = await Lot.findById(
+        req.params.id
+      );
 
       if (!lot) {
-
         return res.status(404).json({
           message: 'Lot not found.',
         });
-
       }
 
-
-      lot.status = status;
+      lot.paymentStatus =
+        paymentStatus;
 
       lot.updatedAt = new Date();
 
       await lot.save();
 
+      await createTraceabilityEvent({
+        lot,
 
-      await TraceabilityEvent.create({
+        eventType:
+          `PAYMENT_${paymentStatus}`,
 
-        lot: lot._id,
-
-        lotId: lot.lotId,
-
-        eventType: status,
-
-        user: req.user._id,
+        user: req.user,
 
         location: lot.location,
 
         remarks:
-          `Status updated by ${req.user.role}.`,
-
+          `Payment marked as ${paymentStatus}.`,
       });
-
 
       return res.status(200).json({
-        lot: sanitizeLot(lot),
+        message:
+          `Payment marked as ${paymentStatus}.`,
+        lot,
       });
-
-
     } catch (error) {
-
       return res.status(500).json({
-
-        message: 'Unable to update status',
-
+        message:
+          'Unable to update payment',
         error: error.message,
-
       });
-
     }
-
   }
 );
 
+/*
+=================================================
+DELETE LOT
+
+COLLECTOR ONLY
+Only LOT_CREATED lots can be deleted
+=================================================
+*/
+
+router.delete(
+  '/:id',
+  protect('COLLECTOR'),
+
+  async (req, res) => {
+    try {
+      const lot = await Lot.findById(
+        req.params.id
+      );
+
+      if (!lot) {
+        return res.status(404).json({
+          message: 'Lot not found.',
+        });
+      }
+
+      if (
+        String(lot.collector) !==
+        String(req.user._id)
+      ) {
+        return res.status(403).json({
+          message:
+            'You can only delete your own lots.',
+        });
+      }
+
+      if (
+        lot.status !== 'LOT_CREATED'
+      ) {
+        return res.status(400).json({
+          message:
+            'Only unmatched lots can be deleted.',
+        });
+      }
+
+      await lot.deleteOne();
+
+      return res.status(200).json({
+        message:
+          'Lot deleted successfully.',
+      });
+    } catch (error) {
+      return res.status(500).json({
+        message:
+          'Unable to delete lot',
+        error: error.message,
+      });
+    }
+  }
+);
 
 module.exports = router;

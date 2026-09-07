@@ -13,7 +13,7 @@ const lotSchema = new mongoose.Schema(
     sourceLots: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Lot' }],
     materialType: {
       type: String,
-      enum: ['PCB', 'Copper', 'Aluminium', 'Cable', 'Battery', 'Mixed E-Waste', 'Other'],
+      enum: ['PCB', 'Copper', 'Aluminium', 'Steel', 'Cable', 'Battery', 'Mixed E-Waste', 'Plastic', 'Glass', 'Paper', 'Other'],
       required: true,
     },
     image: { type: String },
@@ -21,6 +21,12 @@ const lotSchema = new mongoose.Schema(
     actualWeight: { type: Number },
     location: { type: String, required: true },
     buyer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    aggregator: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    },
+
     buyerType: {
       type: String,
       enum: ['AGGREGATOR', 'RECYCLER', null],

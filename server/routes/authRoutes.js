@@ -11,6 +11,19 @@ const router = express.Router();
 
 const publicRoles = ['COLLECTOR', 'AGGREGATOR', 'RECYCLER'];
 
+const MATERIAL_TYPES = [
+  'PCB',
+  'Copper',
+  'Aluminium',
+  'Steel',
+  'Cable',
+  'Battery',
+  'Mixed E-Waste',
+  'Plastic',
+  'Glass',
+  'Paper',
+  'Other',
+];
 
 function sanitizeUser(user) {
   if (!user) return user;
@@ -21,7 +34,6 @@ function sanitizeUser(user) {
 
   return safeUser;
 }
-
 
 function generateToken(user) {
   return jwt.sign(
@@ -37,7 +49,6 @@ function generateToken(user) {
   );
 }
 
-
 /**
  * REGISTER USER
  */
@@ -50,8 +61,8 @@ router.post('/register', async (req, res) => {
       password,
       role = 'COLLECTOR',
       location,
+      materialsAccepted = [],
     } = req.body;
-
 
     // Validate required fields
     if (!name || !email || !phone || !password) {
@@ -60,10 +71,8 @@ router.post('/register', async (req, res) => {
       });
     }
 
-
     // Normalize role
     const normalizedRole = String(role).toUpperCase();
-
 
     // Prevent public Admin registration
     if (
@@ -76,7 +85,6 @@ router.post('/register', async (req, res) => {
       });
     }
 
-
     // Check existing user
     const existingUser = await User.findOne({
       email: email.toLowerCase(),
@@ -88,16 +96,35 @@ router.post('/register', async (req, res) => {
       });
     }
 
+    // Validate recycler materials
+    let validMaterials = [];
+
+    if (normalizedRole === 'RECYCLER') {
+      if (!Array.isArray(materialsAccepted)) {
+        return res.status(400).json({
+          message: 'Materials accepted must be provided as a list.',
+        });
+      }
+
+      validMaterials = materialsAccepted.filter((material) =>
+        MATERIAL_TYPES.includes(material)
+      );
+
+      if (validMaterials.length === 0) {
+        return res.status(400).json({
+          message:
+            'Recycler must select at least one material that they can recycle.',
+        });
+      }
+    }
 
     /**
      * CREATE USER
      */
-
     const verificationStatus =
       normalizedRole === 'COLLECTOR'
         ? 'VERIFIED'
         : 'PENDING';
-
 
     const newUser = await User.create({
       name,
@@ -109,33 +136,20 @@ router.post('/register', async (req, res) => {
       verificationStatus,
     });
 
-
     /**
-     * IMPORTANT:
-     * Automatically create an Entity
-     * for Aggregators and Recyclers
+     * Automatically create Entity
+     * for Aggregator and Recycler
      */
-
     let newEntity = null;
 
     if (
       normalizedRole === 'AGGREGATOR' ||
       normalizedRole === 'RECYCLER'
     ) {
-      newEntity = await Entity.create({
+      const entityData = {
         name,
         type: normalizedRole,
         location: location || 'Bengaluru',
-
-         materialsAccepted: [
-      'Aluminium',
-      'Copper',
-      'Iron',
-      'Plastic',
-      'Paper',
-      'E-Waste',
-       ],
-
         verificationStatus: 'PENDING',
 
         contactInformation: {
@@ -144,115 +158,85 @@ router.post('/register', async (req, res) => {
         },
 
         user: newUser._id,
-      });
-    }
+      };
 
+      // Only Recycler has material specialization
+      if (normalizedRole === 'RECYCLER') {
+        entityData.materialsAccepted = validMaterials;
+      }
+
+      newEntity = await Entity.create(entityData);
+    }
 
     return res.status(201).json({
       message: 'Registration successful.',
-
       token: generateToken(newUser),
-
       user: sanitizeUser(newUser),
-
       entity: newEntity,
     });
 
-
   } catch (error) {
-
     return res.status(500).json({
       message: 'Unable to register user',
       error: error.message,
     });
-
   }
 });
-
 
 /**
  * LOGIN
  */
-
 router.post('/login', async (req, res) => {
-
   try {
-
     const { email, password } = req.body;
 
-
     if (!email || !password) {
-
       return res.status(400).json({
         message: 'Email and password are required.',
       });
-
     }
-
 
     const user = await User.findOne({
       email: String(email).toLowerCase(),
     });
 
-
     if (!user) {
-
       return res.status(401).json({
         message: 'Invalid email or password.',
       });
-
     }
-
 
     const passwordMatch = await bcrypt.compare(
       password,
       user.password
     );
 
-
     if (!passwordMatch) {
-
       return res.status(401).json({
         message: 'Invalid email or password.',
       });
-
     }
 
-
     return res.status(200).json({
-
       token: generateToken(user),
-
       user: sanitizeUser(user),
-
     });
 
-
   } catch (error) {
-
     return res.status(500).json({
       message: 'Unable to login',
       error: error.message,
     });
-
   }
-
 });
-
 
 /**
  * GET CURRENT USER
  */
-
 router.get('/me', protect(), (req, res) => {
-
   return res.status(200).json({
-
     user: sanitizeUser(req.user),
-
   });
-
 });
-
 
 module.exports = router;
